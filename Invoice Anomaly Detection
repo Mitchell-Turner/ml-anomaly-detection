@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+Invoice Anomaly Detection with Z-Score Explanations
+
+This script performs invoice anomaly detection using the Isolation Forest algorithm
+from the scikit-learn library. It loads invoice data from a CSV file, performs
+feature engineering, fits an Isolation Forest model, flags anomalies, computes
+per-feature z-scores for explanation, and exports the flagged anomalies along with
+their explanations to an Excel file.
+
+Author: Mitchell Turner
+Date: April 2025
+"""
+
+Requirements:
+    pip install scikit-learn pandas numpy openpyxl
+
+Parameters:
+    input_csv (str): Path to the input CSV file containing invoice data.
+    output_excel (str): Path to the output Excel file for anomalies and explanations.
+    contamination (float): Proportion of data points to be flagged as anomalies.
+    features (list): List of feature column names to use for anomaly detection.
+
+Example Usage:
+    python invoice_anomaly_detection.py --input_csv master_invoices.csv \
+                                        --output_excel anomalies.xlsx \
+                                        --contamination 0.002 \
+                                        --features "AP Amount" "Supplier" "Invoice Date"
+"""
+
+import argparse
+import pandas as pd
+from sklearn.ensemble import IsolationForest
+
+def run_invoice_anomaly_detection_with_reasons(
+    input_csv: str,
+    output_excel: str,
+    contamination: float,
+    features: list
+):
+    try:
+        # 1) Load your master invoice CSV
+        df = pd.read_csv(input_csv)
+
+        # 2) Parse the Invoice Date column if present in features
+        if 'Invoice Date' in features:
+            df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+
+        # 3) Feature engineering
+        engineered_features = []
+        for feature in features:
+            if feature == 'Invoice Date':
+                # a) Continuous month index (Jan 2022 → 1, Feb 2022 → 2, …)
+                df['month_idx'] = (
+                    (df['Invoice Date'].dt.year - df['Invoice Date'].dt.year.min()) * 12
+                    + df['Invoice Date'].dt.month
+                )
+                engineered_features.append('month_idx')
+            elif feature == 'Supplier':
+                # b) Encode Supplier as a numeric vendor code
+                df['vendor_enc'] = df['Supplier'].astype('category').cat.codes
+                engineered_features.append('vendor_enc')
+            else:
+                engineered_features.append(feature)
+
+        # 4) Build feature matrix for the model
+        X = df[engineered_features]
+
+        # 5) Fit the IsolationForest model
+        iso = IsolationForest(
+            contamination=contamination,
+            random_state=42,
+            n_jobs=-1
+        )
+        iso.fit(X)
+
+        # 6) Score & flag anomalies
+        df['anomaly_score'] = iso.decision_function(X)   # higher = more "normal"
+        df['is_anomaly']    = iso.predict(X) == -1
+
+        # 7) Compute per-feature z-scores for explanation
+        for col in engineered_features:
+            mean, std = df[col].mean(), df[col].std(ddof=0)
+            df[f'z_{col}'] = (df[col] - mean) / std
+
+        # 8) Determine top driver feature and its z-value
+        z_cols = [f'z_{col}' for col in engineered_features]
+        df['top_driver']   = df[z_cols].abs().idxmax(axis=1).str.replace('z_', '')
+        df['top_driver_z'] = df[z_cols].abs().max(axis=1)
+
+        # 9) Filter anomalies
+        anomalies = df[df['is_anomaly']].copy()
+
+        # 10) Export flagged rows to Excel
+        anomalies.to_excel(
+            output_excel,
+            sheet_name='Anomalies',
+            index=False
+        )
+
+        # 11) Print summary
+        total = len(df)
+        flagged = len(anomalies)
+        print(f"Scanned {total} invoices, flagged {flagged} anomalies.")
+        print(f"Anomalies with reasons written to: {output_excel}")
+
+    except FileNotFoundError:
+        print(f"Input file not found: {input_csv}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Invoice Anomaly Detection')
+    parser.add_argument('--input_csv', type=str, default='master_invoices.csv',
+                        help='Path to the input CSV file containing invoice data')
+    parser.add_argument('--output_excel', type=str, default='invoice_anomalies_with_reasons.xlsx',
+                        help='Path to the output Excel file for anomalies and explanations')
+    parser.add_argument('--contamination', type=float, default=0.002,
+                        help='Proportion of data points to be flagged as anomalies')
+    parser.add_argument('--features', type=str, nargs='+', default=['AP Amount', 'Supplier', 'Invoice Date'],
+                        help='List of feature column names to use for anomaly detection')
+
+    args = parser.parse_args()
+
+    run_invoice_anomaly_detection_with_reasons(
+        input_csv=args.input_csv,
+        output_excel=args.output_excel,
+        contamination=args.contamination,
+        features=args.features
+    )
